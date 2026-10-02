@@ -1,214 +1,205 @@
 /**
- * Four-Layer Deduplication Engine
+ * Deterministic Classifier
  *
- * Layer 1: Exact hash match
- * Layer 2: Normalized text match
- * Layer 3: Near-duplicate similarity (Jaccard)
- * Layer 4: Semantic similarity (requires embeddings — not yet implemented)
+ * This is a rule-based classifier that uses exact matching and simple heuristics.
+ * It does NOT depend on AI/embeddings.
  *
- * All source URLs are preserved throughout the process.
+ * It assigns confidence scores based on the specificity of the match:
+ * - Exact keyword match: high confidence
+ * - Partial/fuzzy match: medium confidence
+ * - Uncertain: low confidence → review queue
+ *
+ * The classifier interface is designed to accept an AI classifier later
+ * without changing the core pipeline.
  */
 
 const crypto = require('crypto');
 
-class FourLayerDedup {
-  constructor(db, logger, problemRepo) {
+class DeterministicClassifier {
+  constructor(db, logger = console) {
     this.db = db;
     this.logger = logger;
-    this.problemRepo = problemRepo;
   }
 
-  /**
-   * Main dedup pipeline
-   * @param {Object} candidateProblem - new problem to check
-   * @returns {Object} { isDuplicate: bool, canonicalId: ?, layer: ?, confidence: ? }
-   */
-  async deduplicate(candidateProblem) {
-    const { gradeId, topicId, originalText, normalizedText, textHash } = candidateProblem;
+  async classifyProblem(problem, gradeId, topicId) {
+    const normalizedText =
+      problem?.normalized_text ||
+      problem?.normalizedText ||
+      DeterministicClassifier.normalizeProblemText(
+        problem?.original_text || problem?.originalText || ''
+      );
 
-    this.logger.debug({ textHash }, 'Starting 4-layer dedup check');
-
-    // Layer 1: Exact hash match
-    const exactMatch = await this._layer1Exact(gradeId, topicId, textHash);
-    if (exactMatch) {
-      return {
-        isDuplicate: true,
-        layer: 'EXACT',
-        canonicalId: exactMatch.id,
-        confidence: 1.0,
-      };
-    }
-
-    // Layer 2: Normalized text match
-    const normalizedMatch = await this._layer2Normalized(gradeId, topicId, normalizedText);
-    if (normalizedMatch) {
-      return {
-        isDuplicate: true,
-        layer: 'NORMALIZED',
-        canonicalId: normalizedMatch.id,
-        confidence: 0.95,
-      };
-    }
-
-    // Layer 3: Near-duplicate (Jaccard similarity)
-    const nearMatch = await this._layer3Near(gradeId, topicId, normalizedText);
-    if (nearMatch) {
-      return {
-        isDuplicate: true,
-        layer: 'NEAR',
-        canonicalId: nearMatch.id,
-        confidence: nearMatch.similarity,
-      };
-    }
-
-    // Layer 4: Semantic (requires embeddings, skipped for now)
-    // TODO: Implement when AI classifier is available
-
-    return {
-      isDuplicate: false,
-      layer: null,
-      canonicalId: null,
-      confidence: null,
+    const classification = {
+      gradeId,
+      topicId,
+      difficulty: 'Intermediate',
+      confidences: {
+        grade: 0.95,
+        topic: 0.95,
+        type: 0.5,
+        difficulty: 0.5,
+      },
+      problemTypeIds: [],
+      flagsForReview: [],
     };
-  }
 
-  /**
-   * Layer 1: Exact hash match (section 18)
-   * @private
-   */
-  async _layer1Exact(gradeId, topicId, textHash) {
-    const existing = await this.db('problems')
-      .where('grade_id', gradeId)
-      .where('topic_id', topicId)
-      .where('text_hash', textHash)
-      .where('status', '!=', 'REJECTED')
-      .first();
+    const difficultyResult = this._extractDifficulty(normalizedText);
+    classification.difficulty = difficultyResult.difficulty;
+    classification.confidences.difficulty = difficultyResult.confidence;
 
-    if (existing) {
-      this.logger.info({ textHash }, 'Exact duplicate found (Layer 1)');
+    const typeResult = await this._extractProblemTypes(normalizedText, topicId);
+    classification.problemTypeIds = typeResult.typeIds;
+    classification.confidences.type = typeResult.confidence;
+
+    const confThreshold = 0.75;
+    if (classification.confidences.difficulty < confThreshold) {
+      classification.flagsForReview.push('DIFFICULTY_LOW_CONFIDENCE');
+    }
+    if (classification.confidences.type < confThreshold) {
+      classification.flagsForReview.push('TYPE_LOW_CONFIDENCE');
     }
 
-    return existing || null;
+    const averages = Object.values(classification.confidences);
+    classification.overallConfidence = Number(
+      (averages.reduce((a, b) => a + b, 0) / averages.length).toFixed(3)
+    );
+
+    return classification;
   }
 
-  /**
-   * Layer 2: Normalized duplicate (section 19)
-   * @private
-   */
-  async _layer2Normalized(gradeId, topicId, normalizedText) {
-    const normalizedHash = crypto
-      .createHash('sha256')
-      .update(normalizedText)
-      .digest('hex');
+  _extractDifficulty(normalizedText) {
+    const text = String(normalizedText || '').toLowerCase();
 
-    const existing = await this.db('problems')
-      .where('grade_id', gradeId)
-      .where('topic_id', topicId)
-      .where('normalized_text', normalizedText)
-      .where('status', '!=', 'REJECTED')
-      .first();
+    const basicKeywords = [
+      'basic',
+      'simple',
+      'beginner',
+      'easy',
+      'calculate',
+      'find',
+      'evaluate',
+      'solve',
+    ];
+    const advancedKeywords = [
+      'advanced',
+      'prove',
+      'demonstrate',
+      'generalize',
+      'complex',
+      'multi-step',
+      'challenge',
+      'show that',
+      'derive',
+    ];
+    const veryAdvancedKeywords = [
+      'olympiad',
+      'complex proof',
+      'research',
+      'theorem',
+      'nontrivial',
+      'rigorous',
+    ];
 
-    if (existing) {
-      this.logger.info({ normalizedHash }, 'Normalized duplicate found (Layer 2)');
-    }
+    let difficulty = 'Intermediate';
+    let confidence = 0.5;
 
-    return existing || null;
-  }
+    const basicMatches = basicKeywords.filter((kw) => text.includes(kw)).length;
+    const advancedMatches = advancedKeywords.filter((kw) => text.includes(kw)).length;
+    const veryAdvancedMatches = veryAdvancedKeywords.filter((kw) => text.includes(kw)).length;
 
-  /**
-   * Layer 3: Near-duplicate using Jaccard similarity (section 20)
-   * @private
-   */
-  async _layer3Near(gradeId, topicId, normalizedText, threshold = 0.85) {
-    // Get all problems in this grade/topic (sampling for performance)
-    const candidates = await this.db('problems')
-      .where('grade_id', gradeId)
-      .where('topic_id', topicId)
-      .where('status', '!=', 'REJECTED')
-      .limit(500); // Avoid full table scan
+    if (veryAdvancedMatches > 0) {
+      difficulty = 'Very Advanced';
+      confidence = 0.7 + Math.min(veryAdvancedMatches * 0.1, 0.25);
+    } else if (advancedMatches >= 2) {
+      difficulty = 'Advanced';
+      confidence = 0.6 + Math.min(advancedMatches * 0.1, 0.3);
+    } else if (basicMatches >= 2) {
+      difficulty = 'Basic';
+      confidence = 0.6 + Math.min(basicMatches * 0.1, 0.3);
+    } else {
+      const sentenceCount = (text.match(/[.!?]/g) || []).length;
+      const hasVariables = /[a-z]\s*=|\$[a-z]\$/i.test(text);
+      const hasProofCue = /(prove|show that|demonstrate|derive)/.test(text);
 
-    const candidateShingles = this._textToShingles(normalizedText);
-
-    let bestMatch = null;
-    let bestSimilarity = 0;
-
-    for (const candidate of candidates) {
-      const existingShingles = this._textToShingles(candidate.normalized_text);
-      const similarity = this._jaccardSimilarity(candidateShingles, existingShingles);
-
-      if (similarity > bestSimilarity) {
-        bestSimilarity = similarity;
-        bestMatch = candidate;
+      if (sentenceCount > 5 || (hasVariables && hasProofCue)) {
+        difficulty = 'Advanced';
+        confidence = 0.45;
       }
     }
 
-    if (bestSimilarity >= threshold) {
-      this.logger.info(
-        { similarity: bestSimilarity, threshold },
-        'Near-duplicate found (Layer 3)'
-      );
-      return { ...bestMatch, similarity: bestSimilarity };
+    return { difficulty, confidence: Math.min(Number(confidence.toFixed(3)), 0.95) };
+  }
+
+  async _extractProblemTypes(normalizedText, topicId) {
+    const text = String(normalizedText || '').toLowerCase();
+
+    const fallbackTypeKeywords = {
+      'Angle Calculation': ['angle', '∠', 'degree', 'degrees', 'measure', 'find angle'],
+      'Side Length Calculation': ['side', 'length', 'perimeter', 'distance', 'cm', 'segment'],
+      Proof: ['prove', 'demonstrate', 'show that', 'verify', 'establish', 'explain why'],
+      Recognition: ['identify', 'which', 'recognize', 'what type', 'is it', 'determine'],
+      'Diagonal Properties': ['diagonal', 'bisect', 'intersect', 'midpoint'],
+      'Equation Solving': ['solve', 'equation', 'x =', 'find x', 'unknown'],
+      'Functions & Graphs': ['function', 'graph', 'slope', 'plot', 'intercept'],
+    };
+
+    let problemTypes = [];
+    if (this.db && typeof this.db === 'function') {
+      try {
+        problemTypes = await this.db('problem_types')
+          .select('*')
+          .where('topic_id', topicId);
+      } catch (error) {
+        this.logger?.warn?.({ error }, 'Falling back to static keyword matching for problem types');
+      }
     }
 
-    return null;
-  }
+    const matched = [];
+    const typeScores = {};
+    const typeKeywords = problemTypes.length
+      ? Object.fromEntries(problemTypes.map((type) => [type.name, type.keywords || []]))
+      : fallbackTypeKeywords;
 
-  /**
-   * Convert text to shingles (n-grams for similarity)
-   * @private
-   */
-  _textToShingles(text, n = 3) {
-    const words = text.toLowerCase().split(/\s+/);
-    const shingles = new Set();
-
-    for (let i = 0; i <= words.length - n; i++) {
-      shingles.add(words.slice(i, i + n).join(' '));
+    for (const [typeName, keywords] of Object.entries(typeKeywords)) {
+      const score = this._scoreKeywordMatches(text, keywords);
+      if (score > 0) {
+        const typeId = problemTypes.find((type) => type.name === typeName)?.id || typeName;
+        typeScores[typeId] = score;
+        matched.push(typeId);
+      }
     }
 
-    return shingles;
+    let confidence = 0.5;
+    if (matched.length > 0) {
+      const matchCount = Math.max(...Object.values(typeScores));
+      confidence = Math.min(0.3 + matchCount * 0.2, 0.9);
+    }
+
+    matched.sort((a, b) => (typeScores[b] || 0) - (typeScores[a] || 0));
+
+    return {
+      typeIds: matched,
+      confidence: Number(confidence.toFixed(3)),
+    };
   }
 
-  /**
-   * Compute Jaccard similarity between two sets
-   * @private
-   */
-  _jaccardSimilarity(set1, set2) {
-    const intersection = new Set([...set1].filter((x) => set2.has(x)));
-    const union = new Set([...set1, ...set2]);
-
-    if (union.size === 0) return 0;
-    return intersection.size / union.size;
+  _scoreKeywordMatches(text, keywords = []) {
+    if (!Array.isArray(keywords) || keywords.length === 0) return 0;
+    return keywords.filter((keyword) => typeof keyword === 'string' && text.includes(keyword.toLowerCase())).length;
   }
 
-  /**
-   * Handle duplicate resolution
-   * If a duplicate is detected:
-   * 1. Keep the canonical problem
-   * 2. Add the new source URL to the canonical
-   * 3. Record the duplicate group
-   */
-  async resolveDuplicate(newProblem, dedupResult) {
-    const { canonicalId, layer, confidence } = dedupResult;
+  static computeTextHash(text) {
+    return crypto.createHash('sha256').update(String(text || '')).digest('hex');
+  }
 
-    this.logger.info(
-      { canonicalId, layer, confidence },
-      'Resolving duplicate: adding source to canonical'
-    );
-
-    // Add new source to canonical problem
-    await this.problemRepo.addSourceToProblem(
-      canonicalId,
-      newProblem.sourceUrl,
-      newProblem.sourceDomain,
-      newProblem.sourceName,
-      newProblem.publishedDate
-    );
-
-    // Record the duplicate relationship
-    await this.problemRepo.recordDuplicateGroup(canonicalId, [newProblem.id], layer, confidence);
-
-    return { deduplicated: true, canonicalId };
+  static normalizeProblemText(text) {
+    return String(text || '')
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, ' ')
+      .replace(/[^\w\s\-.,;:!?()\[\]{}]/g, '')
+      .replace(/\.$/, '');
   }
 }
 
-module.exports = FourLayerDedup;
+module.exports = DeterministicClassifier;
