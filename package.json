@@ -1,22 +1,17 @@
-{
-  "name": "ptien-math-hunter",
-  "version": "0.2.0",
-  "description": "Intelligent Internet-Based Mathematics Research, Collection, Classification & Self-Study Workbook System",
-  "main": "src/index.js",
-  "scripts": {
-    "start": "node src/index.js",
-    "test": "node --test"
-  },
-  "keywords": [
-    "math",
-    "classification",
-    "education",
-    "deduplication",
-    "research"
-  ],
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/phuctien11010-ops/ptien-math-hunter.git"
-  }
-}
+const DeterministicClassifier = require('./classifier/determinist-classifier');
+const FourLayerDedup = require('./dedup/four-layer-dedup');
+const ProblemRepository = require('./repositories/problem-repository');
+const { ProblemStore } = require('./store');
+const { MathProblemPipeline } = require('./pipeline');
+const { createServer } = require('./server');
+
+module.exports = {
+  DeterministicClassifier,
+  FourLayerDedup,
+  ProblemRepository,
+  ProblemStore,
+  MathProblemPipeline,
+  createServer,
+};
+
+module.exports.default = module.exports;
