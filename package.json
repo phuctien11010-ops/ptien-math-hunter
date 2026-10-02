@@ -1,17 +1,28 @@
-const DeterministicClassifier = require('./classifier/determinist-classifier');
-const FourLayerDedup = require('./dedup/four-layer-dedup');
-const ProblemRepository = require('./repositories/problem-repository');
-const { ProblemStore } = require('./store');
-const { MathProblemPipeline } = require('./pipeline');
-const { createServer } = require('./server');
-
-module.exports = {
-  DeterministicClassifier,
-  FourLayerDedup,
-  ProblemRepository,
-  ProblemStore,
-  MathProblemPipeline,
-  createServer,
-};
-
-module.exports.default = module.exports;
+{
+  "name": "ptien-math-hunter",
+  "version": "1.0.0-phase1",
+  "description": "PTIEN Math Hunter - Phase 1: Intelligent Mathematics Problem Collection, Classification & Workbook Generation System",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/**/*.test.js",
+    "phase1": "node src/phase1.js",
+    "phase1:test": "node --test test/phase1.test.js"
+  },
+  "keywords": [
+    "math",
+    "education",
+    "classification",
+    "deduplication",
+    "workbook",
+    "vietnamese-education"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/phuctien11010-ops/ptien-math-hunter.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
